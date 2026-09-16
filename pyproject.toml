@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=77", "numpy>=2.5"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nulldtype"
+version = "0.1.0.dev0"
+description = "Missing values as a NumPy DType: NA stored as a reserved bit pattern of the wrapped type"
+readme = "README.md"
+license = "BSD-3-Clause"
+license-files = ["LICENSE.txt"]
+requires-python = ">=3.12"
+dependencies = ["numpy>=2.5"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Programming Language :: C",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.urls]
+Source = "https://github.com/tuan2k33/NullableDType"
+
+[tool.setuptools]
+py-modules = ["nulldtype"]
+
+[tool.pytest.ini_options]
+testpaths = ["test_basic.py"]

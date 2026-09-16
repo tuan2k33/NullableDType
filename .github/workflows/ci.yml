@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # numpy main moves daily; catch breakage from the nightly wheels
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: py${{ matrix.python }} numpy ${{ matrix.numpy }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { python: "3.12", numpy: "2.5.*" }
+          - { python: "3.13", numpy: "latest" }
+          - { python: "3.14", numpy: "latest" }
+          - { python: "3.14", numpy: "nightly" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          allow-prereleases: true
+      - name: Install numpy
+        run: |
+          python -m pip install -U pip setuptools pytest
+          case "${{ matrix.numpy }}" in
+            latest)  python -m pip install numpy ;;
+            nightly) python -m pip install --pre --upgrade numpy \
+                       --index-url https://pypi.anaconda.org/scientific-python-nightly-wheels/simple ;;
+            *)       python -m pip install "numpy==${{ matrix.numpy }}" ;;
+          esac
+          python -c "import numpy; print(numpy.__version__)"
+      - name: Build against that numpy
+        # no build isolation, so the extension is compiled against the numpy
+        # under test rather than whatever pip would pick
+        run: python -m pip install -v --no-build-isolation --no-deps .
+      - name: Test
+        run: python -m pytest -q test_basic.py
+
+  sanitizers:
+    name: ASAN + UBSAN
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: python -m pip install numpy pytest
+      - name: Build with sanitizers
+        env:
+          PYTHON: python
+          CFLAGS: -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=undefined
+        run: ./build.sh
+      - name: Test under the sanitizers
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          PYTHONPATH: .
+        run: |
+          export LD_PRELOAD="$(gcc -print-file-name=libasan.so) $(gcc -print-file-name=libubsan.so)"
+          python -P -m pytest -q test_basic.py

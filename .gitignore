@@ -2,3 +2,6 @@ __pycache__/
 .pytest_cache/
 *.so
 *.o
+build/
+*.egg-info/
+local.env
