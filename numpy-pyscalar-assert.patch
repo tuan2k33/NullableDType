@@ -1,0 +1,19 @@
+diff --git a/numpy/_core/src/multiarray/convert_datatype.c b/numpy/_core/src/multiarray/convert_datatype.c
+index e67dd0674e..ca05d43e0b 100644
+--- a/numpy/_core/src/multiarray/convert_datatype.c
++++ b/numpy/_core/src/multiarray/convert_datatype.c
+@@ -843,10 +843,11 @@ can_cast_pyscalar_scalar_to(
+         int flags, PyArray_Descr *to, NPY_CASTING casting)
+ {
+     /*
+-     * This function only works reliably for legacy (NumPy dtypes).
+-     * If we end up here for a non-legacy DType, it is a bug.
++     * The hardcoded shortcuts below are legacy-only; the fall-through path is
++     * generic and handles any DType, so a non-legacy `to` is fine here.  A
++     * third-party DType that registers a promoter against the Python scalar
++     * DTypes reaches this legitimately (via the buffered ufunc path).
+      */
+-    assert(NPY_DT_is_legacy(NPY_DTYPE(to)));
+ 
+     /*
+      * Quickly check for the typical numeric cases, where the casting rules
