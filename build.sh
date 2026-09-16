@@ -19,7 +19,13 @@ PYINC=$($PY -c "import sysconfig; print(sysconfig.get_paths()['include'])")
 NPINC=$($PY -P -c "import numpy; print(numpy.get_include())")
 EXT=$($PY -c "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))")
 
-${CC:-gcc} -O2 -fPIC -shared -Wall $CFLAGS \
+# numpy >= 2.5 requires x86-64-v2 on x86-64 already; see setup.py
+case "$(uname -m)" in
+    x86_64) ARCHFLAGS="-march=x86-64-v2 -mtune=generic" ;;
+    *) ARCHFLAGS="" ;;
+esac
+
+${CC:-gcc} -O2 -fPIC -shared -Wall $ARCHFLAGS $CFLAGS \
     -I"$PYINC" -I"$NPINC" \
     src/nulldtype.c \
     -o "_nulldtype$EXT"

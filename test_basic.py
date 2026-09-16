@@ -2537,3 +2537,54 @@ def test_integer_power_over_a_gap(t, n):
         with pytest.raises(ValueError, match="negative integer powers"):
             np.power(np.array([2], dtype=t).astype(dt),
                      np.array([-1], dtype=t).astype(dt))
+
+
+_INPLACE_TYPES = [np.int8, np.int32, np.int64, np.uint8, np.uint64,
+                  np.float16, np.float32, np.float64, np.complex128]
+
+
+@pytest.mark.parametrize("t", _INPLACE_TYPES)
+@pytest.mark.parametrize("n", [3, 5000])
+def test_inplace_ops_keep_their_gaps(t, n):
+    """With `out=` one of the inputs, the wrapped loop overwrites the gap
+    before anything looks at it: `a += 1` turned an int32 gap into
+    -2147483647, `np.square(a, out=a)` into 0.  Gaps are now recorded before
+    the loop runs."""
+    dt = nd.Nullable(t)
+
+    def with_gaps():
+        a = np.full(n, 3, dtype=t).astype(dt)
+        a[1] = a[n - 1] = nd.NA
+        return a
+
+    gaps = np.zeros(n, dtype=bool)
+    gaps[[1, n - 1]] = True
+    ones = np.ones(n, dtype=t).astype(dt)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)   # e.g. 3 ** 3 in int8
+        for name in ("add", "subtract", "multiply", "maximum"):
+            a = with_gaps()
+            getattr(np, name)(a, ones, out=a)
+            np.testing.assert_array_equal(nd.isna(a), gaps, err_msg=name)
+            b = with_gaps()
+            getattr(np, name)(ones, b, out=b)
+            np.testing.assert_array_equal(nd.isna(b), gaps, err_msg=name)
+            c = with_gaps()
+            getattr(np, name)(c, c, out=c)
+            np.testing.assert_array_equal(nd.isna(c), gaps, err_msg=name)
+        if np.dtype(t).kind in "fc":
+            # x86 keeps the left NaN's payload, so writing `nan + NA` over the
+            # right operand replaces the gap with an ordinary NaN
+            nan = np.full(n, np.nan, dtype=t).astype(dt)
+            b = with_gaps()
+            np.add(nan, b, out=b)
+            np.testing.assert_array_equal(nd.isna(b), gaps, err_msg="nan + NA")
+        for name in ("square", "negative", "absolute", "invert", "sign",
+                     "sqrt", "reciprocal"):
+            a = with_gaps()
+            try:
+                getattr(np, name)(a, out=a)
+            except (TypeError, ValueError):
+                continue            # not defined for this dtype, or unsafe out
+            np.testing.assert_array_equal(nd.isna(a), gaps, err_msg=name)

@@ -42,6 +42,9 @@ pip install .                       # normal install
 ./run_tests.sh -k argmax            # extra args go to pytest
 ```
 
+On x86-64, `build.sh` and `setup.py` compile with `-march=x86-64-v2`, which
+numpy 2.5 requires already; the NA scans need its 64-bit compare to vectorise.
+
 The scripts use `PYTHON` (default `python3`) and prepend `NUMPY_SITE` to
 `PYTHONPATH` when set; `local.env` (gitignored) supplies both on the owner's
 machine, which points at a numpy dev tree. CI (`.github/workflows/ci.yml`)

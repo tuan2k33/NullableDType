@@ -50,7 +50,7 @@ builds and runs pytest (extra arguments go to pytest). They use `python3`;
 set `PYTHON`, and `NUMPY_SITE` for a numpy dev tree that is not installed, or
 put both in an uncommitted `local.env`.
 
-The suite has 609 tests plus 2 expected failures that pin known gaps. It also
+The suite has 627 tests plus 2 expected failures that pin known gaps. It also
 passes on an ASAN + UBSAN build, which CI runs on every push.
 
 ## What works

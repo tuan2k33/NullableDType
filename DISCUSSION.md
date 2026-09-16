@@ -21,20 +21,32 @@ for (i = 0; i < N; i++)
 One function covers every binary ufunc — instead of the 50 hand-written
 wrappers in `numpy.ma`.
 
-For floats there is a shortcut: after the operation the hardware has already
-propagated a NaN, so **one pass over the output** while it is still hot in cache
-says whether there is anything to fix at all, and an array without gaps stops
-there. For `int`, `INT_MIN` propagates nothing, so the inputs have to be scanned.
+The work goes in blocks of 1024 elements, small enough for L1, so each block
+is scanned, computed and stamped while it is hot: one trip through memory
+rather than one for the wrapped loop and another for the fixup.
 
-Both scans run in blocks of 2048 elements and are written so the compiler
-vectorises them at `-O2`: integer bit tests instead of float compares, and no
-branches. For floats, a block whose output holds no NaN or inf is skipped
-outright; for integers, a block costs one pass that ORs "is NA" over both
-inputs and "landed on the reserved value" over the output. Only a block that
-holds a gap gets a second, blending pass, so one gap costs one block, not a
-second pass over the whole array. The earlier version branched per element and
-scanned every input as soon as the output held a single NaN, and
-`-fopt-info-vec` showed that none of these loops vectorised.
+**Gaps are recorded before the wrapped loop runs**, into a small mask on the
+stack. Reading the inputs afterwards is wrong whenever the output is one of
+them: `a += 1` on an `int32` array turned a gap into `-2147483647`
+(`INT_MIN + 1`), `np.square(a, out=a)` into 0, and `np.add(nan, b, out=b)`
+replaced a float gap with the left operand's ordinary NaN, because x86 keeps
+the left payload. All of that shipped until the in-place tests were added.
+The unary loops record their gaps first for the same reason.
+
+For floats there is one shortcut. When the op propagates NaN and the output is
+not one of the inputs, a block is computed first and only its output is
+looked at — one memory stream instead of two. A block with no NaN or inf
+there has no gap in its inputs, and only a block that does gets its inputs
+scanned. `binop_swallows_nan` lists the ops that may turn a NaN into a number;
+they always scan first.
+
+The scans are one small function per width with `restrict` parameters, and
+integer bit tests instead of float compares. The mask is a `char` array, which
+may alias anything, and at `-O2` GCC will not add a runtime alias check, so
+without `restrict` `-fopt-info-vec` showed that none of these loops
+vectorised. `a + a` (and every unary op) scans its one array once. On x86-64
+the build uses `-march=x86-64-v2`, which numpy 2.5 already requires: SSE2 has
+no 64-bit compare, and the `int64`/`float64` scans are much slower without one.
 
 A few operations cannot run straight over a gap, and they take a `where=` path
 so the wrapped loop never touches it: see "Two traps in borrowing someone
@@ -191,22 +203,24 @@ operation, of which the loop lookups are about 1.4 µs (`resolve_dtypes` 0.54 µ
 `_resolve_dtypes_and_context` plus `_get_strided_loop` 0.89 µs). A cache could
 remove most of that.
 
-Making the scan branch-free and blocked (above) changed `a + a`, measured with
-`scratchpad/bench_fixup.py` (numpy 2.5.3, gcc 15, `-O2`, best of 9; WSL timings
-are noisy, so read these as ranges):
+The fixup as described above, against the per-element version it replaced,
+for `a + b` with two distinct arrays (numpy 2.5.3, gcc 15, median of six
+interleaved rounds, best of 7 in each; WSL timings are noisy, so read these as
+ranges):
 
-| case | before | after | plain numpy |
+| case | plain numpy | per-element fixup | blocked, `-O2 -march=x86-64-v2` |
 |---|---|---|---|
-| `f8`, n = 100,000 | 62–66 µs | 53–55 µs | 20 µs |
-| `f8`, n = 100,000, one gap | 125–137 µs | 51–54 µs | — |
-| `i4`, n = 100,000 | 71–73 µs | 40–54 µs | 10 µs |
-| `i4`, n = 1,000,000 | 730–820 µs | 380–500 µs | 90–140 µs |
-| `i8`, `f8` at n ≥ 1,000,000 | — | about the same | — |
-| n = 1,000 | ~3 µs | ~3 µs | 0.6 µs |
+| `f8`, n = 1,000 | 0.6 µs | 3.2 µs | 3.0 µs |
+| `f8`, n = 100,000 | 27 µs | 125–137 µs (before), 61 µs | 51 µs |
+| `f8`, n = 100,000, one gap | — | 63 µs | 54 µs |
+| `i4`, n = 100,000 | 14 µs | 72 µs (before), 45 µs | 38 µs |
+| `i8`, n = 1,000,000 | — | 2.4 ms | 1.7 ms |
+| `f8`, n = 10,000,000 | ~10 ms | 18.6 ms | 15.1 ms |
 
-At ten million elements everything is bound by memory bandwidth, and Nullable
-stays around 1.6–2x plain numpy: it has to read the inputs as well as the
-output.
+That leaves Nullable about 2x plain numpy for floats and 2.7x for `int32` at
+100,000 elements, most of it the extra read of the inputs, and about 5x on
+small arrays, where the fixed cost dominates. At ten million elements it is
+bound by memory bandwidth, around 1.5x.
 
 The two changes that mattered most, measured on the old layout at the time but
 still in use: **borrowing T's C loop through the `numpy_1.24_ufunc_call_info`
