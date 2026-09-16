@@ -168,6 +168,16 @@ in this dtype's resolver, and it should be fixed here, not in numpy.
 and are correct. `a.mean()` and `np.mean(a)` on an integer or bool Nullable
 array are not.
 
+**Status.** This patch is drafted as a real commit against numpy `main`
+(`BUG: give non-legacy DTypes their own answer for mean/var's result dtype`),
+with the regression test above and a `StringDType` test added to
+`numpy/_core/tests/test_multiarray.py`. Against it: `test_multiarray.py`,
+`test_numeric.py`, `test_regression.py`, `numpy/ma/tests/` and
+`numpy/lib/tests/` all pass unchanged (25,525 passed), and this project's own
+`test_numpy_mean_of_nullable_int_is_not_truncated` (`xfail(strict=True)`)
+turns into an `XPASS`, which is the pin firing exactly as intended. Not yet
+submitted upstream.
+
 ## 3. `all`, `any`, and `array_equal` through them
 
 **Path.** [`fromnumeric.all`][base-all] → `ndarray.all`, which is
