@@ -4,6 +4,7 @@ name: Release
 on:
   push:
     tags: ["v*"]
+    branches: ["ci/**"]   # try the wheel build without releasing
   workflow_dispatch:
 
 permissions:
