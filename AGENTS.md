@@ -17,6 +17,10 @@ numpy** — never patch numpy to make something here work.
   `__getattr__` that forwards every other name to numpy (`nd.sort is np.sort`)
   and refuses misleading ones (`nd.nansum`) through `_REFUSED`.
 - `test_basic.py` — the whole test suite.
+- `README.md` (using it), `DISCUSSION.md` (how and why, measurements, bugs
+  found), `LAYOUTS.md` (NA patterns), `VS-NUMPY-MA.md` (generated comparison),
+  `NUMPY-PATCHES.md` (where numpy's array functions fail, and upstream patch
+  sketches).
 - `scratchpad/` — measurement scripts: `compare_ma.py` (generates the tables in
   `VS-NUMPY-MA.md`), `leakcheck.py`, `leak_suv.py`, `leak_records.py`,
   reproducers for numpy bugs.
@@ -83,7 +87,8 @@ a gap is a value nobody knows.
 - Match the surrounding style: comments explain *why*, usually with the
   measured reason (e.g. which numpy code path forces the choice).
 - Every behaviour fix gets a test that fails without it.
-- Keep `README.md`, `LAYOUTS.md` and `VS-NUMPY-MA.md` in step with the code,
-  including the test count in `README.md`.
+- Keep the documents in step with the code, including the test count in
+  `README.md`. Usage belongs in `README.md`; reasoning, measurements and bug
+  stories in `DISCUSSION.md`.
 - Upstream numpy communications (issues, PRs) are drafted only; the owner
   posts them.
