@@ -1,5 +1,7 @@
 # Nullable[T] — prototype
 
+[![CI](https://github.com/tuan2k33/NullableDType/actions/workflows/ci.yml/badge.svg)](https://github.com/tuan2k33/NullableDType/actions/workflows/ci.yml)
+
 `Nullable[T]` is a **parametric DType**: it wraps any other dtype and gives it a
 notion of missing data. The goal is to replace `numpy.ma` with something where
 the missingness lives **inside the dtype**, not in a parallel array class.
