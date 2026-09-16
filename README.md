@@ -32,12 +32,15 @@ two layers compose. In the terms of the 2012 NumPy discussion, this is
 
 ## Running it
 
-Needs Python 3.12+, numpy 2.5+ and a C compiler. Tested on Linux with numpy
-2.5 and the nightly wheels. It will not load on numpy 2.3 or older, which lack
+Needs Python 3.12+ and numpy 2.5+; building from source also needs a C
+compiler. CI tests Linux with numpy 2.5, the latest release and the nightly
+wheels, and the release wheels are tested on Linux (x86-64, ARM), macOS and
+Windows. It will not load on numpy 2.3 or older, which lack
 the DType API slots it uses.
 
 ```bash
-pip install .                    # build and install
+pip install nulldtype            # wheels for Linux, macOS and Windows
+pip install .                    # or build from a checkout
 pip install pytest && pytest     # run the suite
 ```
 

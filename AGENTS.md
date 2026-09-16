@@ -45,7 +45,9 @@ The scripts use `PYTHON` (default `python3`) and prepend `NUMPY_SITE` to
 `PYTHONPATH` when set; `local.env` (gitignored) supplies both on the owner's
 machine, which points at a numpy dev tree. CI (`.github/workflows/ci.yml`)
 tests numpy 2.5, the latest release and the nightly wheels, plus an
-ASAN + UBSAN job.
+ASAN + UBSAN job. `.github/workflows/release.yml` builds wheels with
+cibuildwheel (also on `ci/**` branches) and publishes a `v*` tag to PyPI
+through trusted publishing.
 
 After any change to `src/nulldtype.c`, also:
 
