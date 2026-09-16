@@ -240,6 +240,10 @@ plain arrays, is in `NUMPY-PATCHES.md`.
 - Coercion to a Python scalar **raises**; use `nd.filled(x, ...)` to get out.
 - **A cast never quietly creates an NA**, and never quietly drops one.
 
+## AI Disclosure
+
+AI was used in writing this project's code, tests and documentation.
+
 ## License
 
 BSD 3-Clause, the same terms as NumPy; see `LICENSE.txt`.
