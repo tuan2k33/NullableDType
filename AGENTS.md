@@ -32,23 +32,27 @@ numpy** — never patch numpy to make something here work.
 
 ## Build and test
 
-Built against a local numpy dev build (paths are hard-coded in the scripts):
+Requires Python >= 3.12 and numpy >= 2.5. Packaging is `pyproject.toml` + `setup.py` (setuptools).
 
 ```bash
-./build.sh                          # compile src/nulldtype.c -> _nulldtype*.so
-./run_tests.sh                      # build + pytest test_basic.py
+pip install .                       # normal install
+./build.sh                          # build _nulldtype*.so in place
+./run_tests.sh                      # build in place + pytest test_basic.py
 ./run_tests.sh -k argmax            # extra args go to pytest
 ```
 
-Python is `/mnt/c/Dev/projects/numpy/.venv/bin/python3`, with
-`PYTHONPATH=/mnt/c/Dev/projects/numpy/build-install/usr/lib/python3/dist-packages:.`
-and `-P`.
+The scripts use `PYTHON` (default `python3`) and prepend `NUMPY_SITE` to
+`PYTHONPATH` when set; `local.env` (gitignored) supplies both on the owner's
+machine, which points at a numpy dev tree. CI (`.github/workflows/ci.yml`)
+tests numpy 2.5, the latest release and the nightly wheels, plus an
+ASAN + UBSAN job.
 
 After any change to `src/nulldtype.c`, also:
 
-1. build with `-O1 -g -fsanitize=address,undefined` into a scratch directory and
-   run the whole suite with `LD_PRELOAD` of `libasan.so` and `libubsan.so`
-   (`ASAN_OPTIONS=detect_leaks=0`); there must be no report;
+1. build with sanitizers and run the whole suite, as the CI job does:
+   `CFLAGS="-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined" ./build.sh`,
+   then pytest with `LD_PRELOAD` of `libasan.so` and `libubsan.so` and
+   `ASAN_OPTIONS=detect_leaks=0`; there must be no report;
 2. run a leak-scaling check over the changed paths (`scratchpad/leak*.py`, or a
    new one in the same style): block counts and refcounts must stay flat as the
    iteration count grows.

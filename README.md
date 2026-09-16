@@ -26,12 +26,19 @@ nd.Nullable(record)       # itemsize T   — every field holds its own type's NA
 
 ## Running it
 
+Needs Python 3.12+, numpy 2.5+ and a C compiler. Tested on Linux with numpy
+2.5 and the nightly wheels. (It will not load on numpy 2.3 or older, which
+lack the DType API slots it uses.)
+
 ```bash
-./build.sh       # compile
-./run_tests.sh   # build + pytest
+pip install .                    # build and install
+pip install pytest && pytest     # run the suite
 ```
 
-The build uses the numpy dev tree at `/mnt/c/Dev/projects/numpy/build-install`.
+For working on the C code, `./build.sh` builds in place and `./run_tests.sh`
+builds and runs pytest (extra arguments go to pytest). They use `python3`;
+set `PYTHON`, and `NUMPY_SITE` for a numpy dev tree that is not installed, or
+put both in an uncommitted `local.env`.
 
 ## What works
 
