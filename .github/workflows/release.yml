@@ -1,0 +1,60 @@
+name: Release
+
+# Builds wheels on every run; publishes to PyPI only for a `v*` tag.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wheels:
+    name: wheels (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pypa/cibuildwheel@v4.2.1
+        env:
+          CIBW_BUILD: "cp312-* cp313-* cp314-*"
+          CIBW_TEST_REQUIRES: pytest
+          # run the suite against the installed wheel, from outside the source
+          # tree so the local nulldtype.py does not shadow it
+          CIBW_TEST_COMMAND: >-
+            python -c "import shutil; shutil.copy(r'{project}/test_basic.py', '.')"
+            && python -m pytest -q test_basic.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pipx run build --sdist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [wheels, sdist]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/nulldtype
+    permissions:
+      id-token: write   # PyPI trusted publishing, no token stored
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
