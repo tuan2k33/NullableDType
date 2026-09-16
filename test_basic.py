@@ -2411,3 +2411,11 @@ def test_reductions_over_several_axes():
     assert np.logical_or.reduce(b, axis=None) == True       # noqa: E712
     i = np.arange(6).reshape(2, 3).astype(nd.Nullable(np.int32))
     assert np.bitwise_or.reduce(i, axis=None) == 7
+
+
+@pytest.mark.xfail(strict=True, reason="numpy picks a float mean only for its "
+                   "own integer types; see NUMPY-PATCHES.md, section 2")
+def test_numpy_mean_of_nullable_int_is_not_truncated():
+    i = np.array([1, 2], dtype=nd.Nullable(np.int64))
+    assert nd.mean(i) == 1.5          # the nd version is right
+    assert np.mean(i) == 1.5          # numpy's gives 1
