@@ -642,22 +642,82 @@ typedef struct {
  * failure rather than as a stray warning in someone's output.
  */
 static int
-binop_signals_on_gap(int idx)
+binop_signals_on_gap(int idx, int complex_operand)
 {
     const char *n = binop_names[idx];
-    return strcmp(n, "logaddexp") == 0 || strcmp(n, "logaddexp2") == 0;
+    if (strcmp(n, "logaddexp") == 0 || strcmp(n, "logaddexp2") == 0) {
+        return 1;
+    }
+    /*
+     * Complex kernels compare magnitudes almost everywhere: division scales by
+     * the larger component, `power` special-cases, ordering is lexicographic
+     * with `<`.  Only the plain componentwise ops stay quiet over a NaN.
+     */
+    if (complex_operand) {
+        return !(strcmp(n, "add") == 0 || strcmp(n, "subtract") == 0
+                 || strcmp(n, "multiply") == 0 || strcmp(n, "equal") == 0
+                 || strcmp(n, "not_equal") == 0);
+    }
+    return 0;
 }
 
 /*
- * Ops that return the non-NaN operand instead of propagating.  A float gap is
- * a NaN, so for these a gap vanishes from the output and cannot be recovered
- * from the result alone.
+ * Ops whose result can be an ordinary number although an operand is NaN.  A
+ * float gap is a NaN, so for these a gap can vanish from the output and the
+ * output scan in `nullable_fixup` would not see it:
+ *
+ *   fmax, fmin        return the non-NaN operand by design
+ *   power, float_power  pow(1, NaN) and pow(NaN, 0) are 1 (IEEE 754, C99)
+ *   copysign          only reads the sign bit of its second operand
+ *   heaviside         heaviside(x, NaN) is 0 or 1 unless x == 0
+ *   hypot             hypot(±inf, NaN) is inf
+ *
+ * `test_every_binop_keeps_a_gap` sweeps all registered ops over special
+ * values, so one missing from this list fails a test.
  */
 static int
 binop_swallows_nan(int idx)
 {
+    static const char *const names[] = {
+        "fmax", "fmin", "power", "float_power", "copysign", "heaviside",
+        "hypot",
+    };
     const char *n = binop_names[idx];
-    return strcmp(n, "fmax") == 0 || strcmp(n, "fmin") == 0;
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        if (strcmp(n, names[i]) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/*
+ * Ops whose IEEE 754 kernel already answers "does the result depend on the
+ * NaN operand?": it returns a number exactly when it does not.  A gap is a
+ * value nobody knows, so the same rule applies to it, as in R and pandas:
+ *
+ *   power, float_power   1 ** NA == 1, NA ** 0 == 1
+ *   heaviside            heaviside(x, NA) is 0 or 1 when x != 0
+ *   hypot                hypot(±inf, NA) == inf
+ *
+ * For these a float gap is stamped only where the output came out NaN.  The
+ * other NaN-swallowing ops (`fmax`, `fmin`, `copysign`) do depend on the
+ * missing value and always give NA.  Integer `power` gets the same two rules
+ * in `nullable_int_power_rules`.
+ */
+static int
+binop_keeps_determined(int idx)
+{
+    const char *n = binop_names[idx];
+    return strcmp(n, "power") == 0 || strcmp(n, "float_power") == 0
+            || strcmp(n, "heaviside") == 0 || strcmp(n, "hypot") == 0;
+}
+
+static int
+binop_is_power(int idx)
+{
+    const char *n = binop_names[idx];
+    return strcmp(n, "power") == 0 || strcmp(n, "float_power") == 0;
 }
 
 /*
@@ -1833,28 +1893,102 @@ nullable_computed_na(const NullableDescr *out)
 }
 
 
-#define NA_FIXUP(CTYPE, MASKEXPR, CHECK)                                      \
+/*
+ * Branch-free, in blocks: a block with no gap in either input -- the common
+ * case -- costs one vectorisable pass that also looks for a computed NA; only
+ * a block that holds a gap gets the second, blending pass.
+ */
+#define NA_BLOCK 2048
+#define NA_FIXUP(CTYPE, ISNA, CHECK, STAMP)                                   \
     do {                                                                      \
         const CTYPE *p0 = (const CTYPE *)data[0];                             \
         const CTYPE *p1 = (const CTYPE *)data[1];                             \
         CTYPE *po = (CTYPE *)data[2];                                         \
         CTYPE na;                                                             \
         memcpy(&na, out->na_bytes, sizeof(CTYPE));                            \
-        for (npy_intp i = 0; i < N; i++) {                                    \
-            CTYPE x = p0[i], y = p1[i];                                       \
-            if (MASKEXPR) {                                                   \
-                po[i] = na;                                                   \
+        for (npy_intp s = 0; s < N; s += NA_BLOCK) {                          \
+            npy_intp e = (N - s < NA_BLOCK) ? N : s + NA_BLOCK;               \
+            unsigned char gap = 0, hit = 0;                                   \
+            for (npy_intp i = s; i < e; i++) {                                \
+                CTYPE x = p0[i], y = p1[i];                                   \
+                gap |= (unsigned char)(ISNA(x) | ISNA(y));                    \
+                hit |= (unsigned char)(po[i] == na);                          \
             }                                                                 \
-            else if (CHECK) {                                                 \
-                made |= (po[i] == na);                                        \
+            if (!gap) {                                                       \
+                made |= (CHECK) & hit;                                        \
+                continue;                                                     \
+            }                                                                 \
+            for (npy_intp i = s; i < e; i++) {                                \
+                CTYPE x = p0[i], y = p1[i];                                   \
+                unsigned char m = (unsigned char)((ISNA(x) | ISNA(y))         \
+                                                  & STAMP(po[i]));            \
+                made |= (CHECK) & !m & (po[i] == na);                         \
+                po[i] = m ? na : po[i];                                       \
             }                                                                 \
         }                                                                     \
     } while (0)
 
+/*
+ * Floats only: skip a block unless its output has a NaN or inf (exponent all
+ * ones), then blend exactly where an input is a gap.
+ */
+#define NA_FIXUP_BY_OUTPUT(CTYPE, ISNA, EXPONENT)                             \
+    do {                                                                      \
+        const CTYPE *p0 = (const CTYPE *)data[0];                             \
+        const CTYPE *p1 = (const CTYPE *)data[1];                             \
+        CTYPE *po = (CTYPE *)data[2];                                         \
+        CTYPE na;                                                             \
+        memcpy(&na, out->na_bytes, sizeof(CTYPE));                            \
+        for (npy_intp s = 0; s < N; s += NA_BLOCK) {                          \
+            npy_intp e = (N - s < NA_BLOCK) ? N : s + NA_BLOCK;               \
+            unsigned char special = 0;                                        \
+            for (npy_intp i = s; i < e; i++) {                                \
+                special |= (unsigned char)((po[i] & (EXPONENT)) == (EXPONENT)); \
+            }                                                                 \
+            if (!special) {                                                   \
+                continue;                                                     \
+            }                                                                 \
+            for (npy_intp i = s; i < e; i++) {                                \
+                CTYPE x = p0[i], y = p1[i];                                   \
+                unsigned char m = (unsigned char)(ISNA(x) | ISNA(y));         \
+                po[i] = m ? na : po[i];                                       \
+            }                                                                 \
+        }                                                                     \
+    } while (0)
+
+#define ISNA_F8(v) (((v) & 0x7FFFFFFFFFFFFFFFULL) == 0x7FFFFFFFFFFFFFFFULL)
+#define ISNA_F4(v) (((v) & 0x7FFFFFFFU) == 0x7FFFFFFFU)
+#define ISNA_EQ(v) ((v) == na)
+/* NaN: exponent all ones, mantissa not zero */
+#define ISNAN_F8(v) ((((v) & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL) \
+                     & (((v) & 0x000FFFFFFFFFFFFFULL) != 0))
+#define ISNAN_F4(v) ((((v) & 0x7F800000U) == 0x7F800000U) & (((v) & 0x007FFFFFU) != 0))
+/* where may a gap be stamped: everywhere, or only where the op gave a NaN */
+#define STAMP_F8(v) ((!keep_numbers) | ISNAN_F8(v))
+#define STAMP_F4(v) ((!keep_numbers) | ISNAN_F4(v))
+#define STAMP_ANY(v) 1
+
+/* the output cell is a NaN; kinds without a NaN say yes, so they are stamped */
+static int
+nullable_out_is_nan(const NullableDescr *out, const char *p)
+{
+    if (out->kind == NA_KIND_F8) {
+        npy_uint64 v; memcpy(&v, p, 8); return ISNAN_F8(v);
+    }
+    if (out->kind == NA_KIND_F4) {
+        npy_uint32 v; memcpy(&v, p, 4); return ISNAN_F4(v);
+    }
+    if (out->kind == NA_KIND_F2) {
+        npy_uint16 v; memcpy(&v, p, 2);
+        return ((v & 0x7C00U) == 0x7C00U) && ((v & 0x03FFU) != 0);
+    }
+    return 1;
+}
+
 static int
 nullable_fixup(NullableDescr *in0, NullableDescr *in1, NullableDescr *out,
         char *const data[], npy_intp const strides[], npy_intp N,
-        int propagates_nan)
+        int propagates_nan, int keep_numbers)
 {
     npy_intp item = out->base.elsize;
     int check = na_can_be_computed(out->kind);
@@ -1866,54 +2000,37 @@ nullable_fixup(NullableDescr *in0, NullableDescr *in1, NullableDescr *out,
 
     if (packed) {
         /*
-         * For floats the hardware has already put a NaN everywhere an input
-         * was NA, so a single pass over the freshly written output — still hot
-         * in cache — tells us whether there is anything to fix at all.  Most
-         * arrays have no gaps and stop here.
+         * Floats: the hardware already put a NaN wherever an input was NA, so
+         * a block whose output holds no NaN has no gap in its inputs either,
+         * and one pass over the freshly written output -- one memory stream
+         * instead of three -- settles it.  Only a block that does hold a NaN
+         * (a gap, or an ordinary NaN) has its inputs looked at.  The test is
+         * on the integer bits, so it vectorises at -O2; an inf trips it too,
+         * which only costs that block's input pass.
          *
-         * This rests on the op propagating NaN.  `fmax`/`fmin` do not: they
-         * return the non-NaN side on purpose, so a gap leaves no trace in the
-         * output and this scan would skip a fixup that is needed.  They are
-         * flagged by `binop_swallows_nan`, which turns this scan off and
-         * forces the full pass; anything else added to `binop_names` that
-         * swallows NaN must be listed there too.
+         * This rests on the op propagating NaN; `binop_swallows_nan` lists
+         * the ones that do not, and they scan the inputs instead.
          */
         if (propagates_nan && out->kind == NA_KIND_F8) {
-            const double *po = (const double *)data[2];
-            int any = 0;
-            for (npy_intp i = 0; i < N; i++) {
-                any |= (po[i] != po[i]);
-            }
-            if (!any) {
-                return 0;
-            }
+            NA_FIXUP_BY_OUTPUT(npy_uint64, ISNA_F8, 0x7FF0000000000000ULL);
+            return 0;
         }
-        else if (propagates_nan && out->kind == NA_KIND_F4) {
-            const float *po = (const float *)data[2];
-            int any = 0;
-            for (npy_intp i = 0; i < N; i++) {
-                any |= (po[i] != po[i]);
-            }
-            if (!any) {
-                return 0;
-            }
+        if (propagates_nan && out->kind == NA_KIND_F4) {
+            NA_FIXUP_BY_OUTPUT(npy_uint32, ISNA_F4, 0x7F800000U);
+            return 0;
         }
         switch (out->kind) {
             case NA_KIND_F8:
-                NA_FIXUP(npy_uint64,
-                    ((x & 0x7FFFFFFFFFFFFFFFULL) == 0x7FFFFFFFFFFFFFFFULL) ||
-                    ((y & 0x7FFFFFFFFFFFFFFFULL) == 0x7FFFFFFFFFFFFFFFULL), 0);
+                NA_FIXUP(npy_uint64, ISNA_F8, 0, STAMP_F8);
                 return 0;
             case NA_KIND_F4:
-                NA_FIXUP(npy_uint32,
-                    ((x & 0x7FFFFFFFU) == 0x7FFFFFFFU) ||
-                    ((y & 0x7FFFFFFFU) == 0x7FFFFFFFU), 0);
+                NA_FIXUP(npy_uint32, ISNA_F4, 0, STAMP_F4);
                 return 0;
             case NA_KIND_EXACT:
-                if (item == 8) { NA_FIXUP(npy_uint64, x == na || y == na, 1); goto done; }
-                if (item == 4) { NA_FIXUP(npy_uint32, x == na || y == na, 1); goto done; }
-                if (item == 2) { NA_FIXUP(npy_uint16, x == na || y == na, 1); goto done; }
-                if (item == 1) { NA_FIXUP(npy_uint8,  x == na || y == na, 1); goto done; }
+                if (item == 8) { NA_FIXUP(npy_uint64, ISNA_EQ, 1, STAMP_ANY); goto done; }
+                if (item == 4) { NA_FIXUP(npy_uint32, ISNA_EQ, 1, STAMP_ANY); goto done; }
+                if (item == 2) { NA_FIXUP(npy_uint16, ISNA_EQ, 1, STAMP_ANY); goto done; }
+                if (item == 1) { NA_FIXUP(npy_uint8,  ISNA_EQ, 1, STAMP_ANY); goto done; }
                 break;
             default:
                 /* f16 and complex: correctness first, via the loop below */
@@ -1921,11 +2038,13 @@ nullable_fixup(NullableDescr *in0, NullableDescr *in1, NullableDescr *out,
         }
     }
     for (npy_intp i = 0; i < N; i++) {
-        if (nullable_is_na(in0, data[0] + i * strides[0])
-                || nullable_is_na(in1, data[1] + i * strides[1])) {
-            nullable_put_na(out, data[2] + i * strides[2]);
+        char *po = data[2] + i * strides[2];
+        if ((nullable_is_na(in0, data[0] + i * strides[0])
+                    || nullable_is_na(in1, data[1] + i * strides[1]))
+                && (!keep_numbers || nullable_out_is_nan(out, po))) {
+            nullable_put_na(out, po);
         }
-        else if (check && nullable_is_na(out, data[2] + i * strides[2])) {
+        else if (check && nullable_is_na(out, po)) {
             made = 1;
         }
     }
@@ -2163,6 +2282,45 @@ nullable_binary_resolve_impl(PyObject *ufunc,
 }
 
 
+/*
+ * Integer `power` over a gap: `1 ** NA` and `NA ** 0` are 1 whatever the gap
+ * holds (see `binop_keeps_determined`).  The masked path has already put NA in
+ * every gap lane; this puts the 1 back where it is determined.
+ */
+static int
+nullable_int_power_rules(NullableDescr *in0, NullableDescr *in1,
+        NullableDescr *out, char *const data[], npy_intp const strides[],
+        npy_intp N)
+{
+    char one0[16] = {0}, zero1[16] = {0}, one_out[16] = {0};
+    if (in0->wrapped->elsize > 16 || in1->wrapped->elsize > 16
+            || out->wrapped->elsize > 16) {
+        return 0;
+    }
+    PyObject *one = PyLong_FromLong(1);
+    PyObject *zero = PyLong_FromLong(0);
+    int rc = (one && zero
+              && PyArray_Pack(in0->wrapped, one0, one) >= 0
+              && PyArray_Pack(in1->wrapped, zero1, zero) >= 0
+              && PyArray_Pack(out->wrapped, one_out, one) >= 0) ? 0 : -1;
+    Py_XDECREF(one);
+    Py_XDECREF(zero);
+    if (rc < 0) {
+        return -1;
+    }
+    for (npy_intp i = 0; i < N; i++) {
+        const char *x = data[0] + i * strides[0];
+        const char *y = data[1] + i * strides[1];
+        int xna = nullable_is_na(in0, x), yna = nullable_is_na(in1, y);
+        if ((yna && !xna && memcmp(x, one0, in0->wrapped->elsize) == 0)
+                || (xna && !yna && memcmp(y, zero1, in1->wrapped->elsize) == 0)) {
+            memcpy(data[2] + i * strides[2], one_out, out->wrapped->elsize);
+        }
+    }
+    return 0;
+}
+
+
 static int
 nullable_binary_loop_impl(int idx, PyArrayMethod_Context *context,
         char *const data[], npy_intp const dimensions[],
@@ -2224,9 +2382,16 @@ nullable_binary_loop_impl(int idx, PyArrayMethod_Context *context,
 
     /*
      * `where=` left the gap lanes untouched, so the output holds whatever the
-     * buffer held before -- never a reliable NaN.  The pre-scan must not run.
+     * buffer held before -- never a reliable NaN.  The pre-scan must not run,
+     * and neither may the "keep a determined number" rule, which reads it.
      */
-    return nullable_fixup(in0, in1, out, data, strides, N, 0);
+    if (nullable_fixup(in0, in1, out, data, strides, N, 0, 0) < 0) {
+        return -1;
+    }
+    if (binop_is_power(idx) && out->kind == NA_KIND_EXACT) {
+        return nullable_int_power_rules(in0, in1, out, data, strides, N);
+    }
+    return 0;
 }
 
 
@@ -2278,7 +2443,8 @@ nullable_fast_loop(PyArrayMethod_Context *context, char *const data[],
     return nullable_fixup(NULLABLE_DESCR(context->descriptors[0]),
                           NULLABLE_DESCR(context->descriptors[1]),
                           NULLABLE_DESCR(context->descriptors[2]),
-                          data, strides, N, !binop_swallows_nan(aux->idx));
+                          data, strides, N, !binop_swallows_nan(aux->idx),
+                          binop_keeps_determined(aux->idx));
 }
 
 
@@ -2297,7 +2463,17 @@ nullable_get_loop_impl(int idx, PyArrayMethod_Context *context,
         return 1;
     }
     /* these must not run over a gap at all; the masked path handles them */
-    if (binop_signals_on_gap(idx)) {
+    int k0 = NULLABLE_DESCR(context->descriptors[0])->kind;
+    int k1 = NULLABLE_DESCR(context->descriptors[1])->kind;
+    int complex_operand = k0 == NA_KIND_C8 || k0 == NA_KIND_C16
+                       || k1 == NA_KIND_C8 || k1 == NA_KIND_C16;
+    /*
+     * An integer gap is INT_MIN, which integer `power` reads as a negative
+     * exponent and refuses; it must not see the gap at all.
+     */
+    int int_power = binop_is_power(idx)
+            && (k0 == NA_KIND_EXACT || k1 == NA_KIND_EXACT);
+    if (binop_signals_on_gap(idx, complex_operand) || int_power) {
         *out_auxdata = NULL;
         return 1;
     }

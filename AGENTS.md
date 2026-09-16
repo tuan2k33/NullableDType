@@ -20,7 +20,8 @@ numpy** — never patch numpy to make something here work.
 - `README.md` (using it), `DISCUSSION.md` (how and why, measurements, bugs
   found), `LAYOUTS.md` (NA patterns), `VS-NUMPY-MA.md` (generated comparison),
   `NUMPY-PATCHES.md` (where numpy's array functions fail, and upstream patch
-  sketches).
+  sketches), `NUMPY-MA-PITFALLS.md` (numpy.ma problems, reproduced by
+  `scratchpad/ma_pitfalls.py`).
 - `scratchpad/` — measurement scripts: `compare_ma.py` (generates the tables in
   `VS-NUMPY-MA.md`), `leakcheck.py`, `leak_suv.py`, `leak_records.py`,
   reproducers for numpy bugs.
@@ -72,7 +73,9 @@ a gap is a value nobody knows.
 
 - Anything that depends on a gap is NA: arithmetic, comparisons (`NA == NA` is
   NA), reductions, `argmax` (points at the first gap, numpy's NaN rule),
-  `nd.isin` against a set containing a gap.
+  `nd.isin` against a set containing a gap.  What does not depend on it keeps
+  its value: `NA & False`, `1 ** NA`, `NA ** 0`, `hypot(inf, NA)`
+  (`binop_keeps_determined`).
 - Skipping is always explicit: `skipna=False` by default on every `nd`
   reduction, `nd.all`/`nd.any`, `nd.argmax`/`nd.argmin`, `nd.cumsum`/`nd.cumprod`.
 - `logical_and/or/xor` and `&`, `|`, `^` on `Nullable(bool)` are Kleene.

@@ -26,6 +26,16 @@ propagated a NaN, so **one pass over the output** while it is still hot in cache
 says whether there is anything to fix at all, and an array without gaps stops
 there. For `int`, `INT_MIN` propagates nothing, so the inputs have to be scanned.
 
+Both scans run in blocks of 2048 elements and are written so the compiler
+vectorises them at `-O2`: integer bit tests instead of float compares, and no
+branches. For floats, a block whose output holds no NaN or inf is skipped
+outright; for integers, a block costs one pass that ORs "is NA" over both
+inputs and "landed on the reserved value" over the output. Only a block that
+holds a gap gets a second, blending pass, so one gap costs one block, not a
+second pass over the whole array. The earlier version branched per element and
+scanned every input as soon as the output held a single NaN, and
+`-fopt-info-vec` showed that none of these loops vectorised.
+
 A few operations cannot run straight over a gap, and they take a `where=` path
 so the wrapped loop never touches it: see "Two traps in borrowing someone
 else's loop".
@@ -176,8 +186,27 @@ nan + NA  ->  [NA nan]     both ways round, and an ordinary nan stays a nan
 | 5,000,000 | 5.1 ms | 14.1 ms | 2.7x |
 
 Almost all of the difference is the NA scan — one extra read over data that was
-just written. On small arrays the fixed cost of `get_loop` (two Python calls per
-operation) dominates, and could be removed with a cache.
+just written. On small arrays the fixed cost dominates: about 2.5 µs per
+operation, of which the loop lookups are about 1.4 µs (`resolve_dtypes` 0.54 µs,
+`_resolve_dtypes_and_context` plus `_get_strided_loop` 0.89 µs). A cache could
+remove most of that.
+
+Making the scan branch-free and blocked (above) changed `a + a`, measured with
+`scratchpad/bench_fixup.py` (numpy 2.5.3, gcc 15, `-O2`, best of 9; WSL timings
+are noisy, so read these as ranges):
+
+| case | before | after | plain numpy |
+|---|---|---|---|
+| `f8`, n = 100,000 | 62–66 µs | 53–55 µs | 20 µs |
+| `f8`, n = 100,000, one gap | 125–137 µs | 51–54 µs | — |
+| `i4`, n = 100,000 | 71–73 µs | 40–54 µs | 10 µs |
+| `i4`, n = 1,000,000 | 730–820 µs | 380–500 µs | 90–140 µs |
+| `i8`, `f8` at n ≥ 1,000,000 | — | about the same | — |
+| n = 1,000 | ~3 µs | ~3 µs | 0.6 µs |
+
+At ten million elements everything is bound by memory bandwidth, and Nullable
+stays around 1.6–2x plain numpy: it has to read the inputs as well as the
+output.
 
 The two changes that mattered most, measured on the old layout at the time but
 still in use: **borrowing T's C loop through the `numpy_1.24_ufunc_call_info`
@@ -375,18 +404,50 @@ returns the *non*-NaN side, so a gap vanishes from the output and the scan skips
 exactly the row that needed fixing: `fmax(NA, 2.0)` gave `2.0`. NA is not NaN —
 it propagates regardless of what the operation does with NaNs.
 
+`fmax` was not the only one. A later sweep over special values found four more
+operations that turn a NaN into a number, all by the book: `pow(1, NaN)` and
+`pow(NaN, 0)` are 1 in IEEE 754 and C99, `copysign` reads only the sign bit,
+`heaviside(x, NaN)` is 0 or 1 unless `x == 0`, and `hypot(±inf, NaN)` is inf.
+They all scan their inputs now (`binop_swallows_nan`), but they do not all
+answer NA.
+
+A gap is a value nobody knows, so what matters is whether the answer depends
+on it. `fmax(NA, 2)` does (the gap might be larger), and so does
+`copysign(1, NA)`: those are NA. `1 ** NA`, `NA ** 0`, `hypot(inf, NA)` and
+`heaviside(3, NA)` do not: whatever the gap holds, the answer is the same, and
+IEEE 754 returns a number exactly in those cases for exactly that reason. So
+for `power`, `float_power`, `hypot` and `heaviside` a gap is stamped only where
+the output came out NaN (`binop_keeps_determined`). This is the same reasoning
+as Kleene logic (`NA & False == False`), and R (`1^NA == 1`, `NA^0 == 1`) and
+pandas (`1 ** pd.NA == 1`) agree; SQL does not (`POWER(1, NULL)` is NULL).
+Complex operands take the masked path and always give NA.
+
+Integer `power` had its own bug: an integer gap is `INT_MIN`, which the loop
+read as a negative exponent, so `2 ** NA` raised "Integers to negative integer
+powers are not allowed". It now takes the masked path, and
+`nullable_int_power_rules` gives back the two determined cases, `1 ** NA` and
+`NA ** 0`. A real negative exponent still raises, as for a plain array.
+
 **`<` and `>` are *signaling* comparisons.** IEEE 754 has them raise
 `FE_INVALID` even on a quiet NaN, while `==` and plain arithmetic stay silent —
 verified in `scratchpad/qnan.c`. The bit-pattern layout lets the loop run
 straight over a gap, so any operation that compares its two operands internally
 (`logaddexp`, `logaddexp2`) reported `invalid value encountered` for data that
-**is not there**. Those take the `where=` path instead.
+**is not there**. Those take the `where=` path instead. The same sweep found
+that complex kernels do this almost everywhere: division scales by the larger
+component, `power` special-cases its arguments, and ordering compares
+lexicographically with `<`. For complex operands only `add`, `subtract`,
+`multiply`, `==` and `!=` run straight over a gap.
 
 Both lists are empirical, not derivable, so the test suite sweeps *every*
 operation, taking the names straight from the C table: an operation missing from
 a list turns a test red instead of turning up as a strange warning in someone's
 output. Verified by mutation — switching off each guard turns 2, 4 and 10 tests
-red respectively.
+red respectively. `test_every_binop_keeps_a_gap` adds the special values
+(0, ±0, 1, ±1, 2, 0.5, ±inf, NaN) on either side of a gap, for every float and
+complex width, and fails on a lost gap or on any floating-point warning;
+removing the four new entries turns 5 of its cases red, removing the complex
+rule 4.
 
 ## The second numpy bug: an assertion too strict for non-legacy DTypes
 

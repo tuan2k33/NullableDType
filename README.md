@@ -26,6 +26,7 @@ two layers compose. In the terms of the 2012 NumPy discussion, this is
 | `LAYOUTS.md` | the NA pattern of every type, and what each gives up |
 | `VS-NUMPY-MA.md` | all 218 names in `numpy.ma.__all__` that numpy 2 still spells that way, side by side with `nd`, with real calls and results |
 | `DISCUSSION.md` | how it works and why: the borrowed loops, performance, the bugs found on the way, leak checking |
+| `NUMPY-MA-PITFALLS.md` | `numpy.ma` behaviours that leak, mislead or raise, with causes and issue links |
 | `NUMPY-PATCHES.md` | where numpy's array functions fail on Nullable, and patches that leave plain arrays unchanged |
 | `AGENTS.md` | notes for coding agents working on the repo |
 | `archive/flag-layout/` | the earlier two-layout version, frozen |
@@ -49,7 +50,7 @@ builds and runs pytest (extra arguments go to pytest). They use `python3`;
 set `PYTHON`, and `NUMPY_SITE` for a numpy dev tree that is not installed, or
 put both in an uncommitted `local.env`.
 
-The suite has 582 tests plus 2 expected failures that pin known gaps. It also
+The suite has 609 tests plus 2 expected failures that pin known gaps. It also
 passes on an ASAN + UBSAN build, which CI runs on every push.
 
 ## What works
@@ -110,6 +111,7 @@ nd.Nullable(">i4")           # Nullable(int32) — stored in native byte order
 | Results follow numpy's rules | `resolve` asks the wrapped ufunc, so `Nullable[i8] / Nullable[i8]` is `Nullable[f8]` and `Nullable[i8] + Nullable[f8]` is `Nullable[f8]` |
 | Mixed operands | `Nullable[T] op T` and Python scalars, both ways round, through promoters |
 | Comparisons | answer `Nullable[bool]`; `NA == NA` is `NA`, not `True` |
+| Answers that do not depend on the gap | `1 ** NA` and `NA ** 0` are 1, `hypot(inf, NA)` is inf, `heaviside(3, NA)` is 1 — as in R and pandas; `fmax(NA, 2)` and `copysign(1, NA)` do depend on it and are NA |
 | Three-valued logic | `logical_and/or/xor` and `&`, `\|`, `^` on `Nullable[bool]` are Kleene: `NA & False = False`, `NA \| True = True`; on ints `&`, `\|`, `^` propagate |
 | Reductions and `accumulate` | propagate by default, like R's `na.rm = FALSE`, over several axes at once too; `cumsum` is NA from the first gap on |
 | `argmax`, `argmin` | the position of the first gap, numpy's rule for NaN, so `a[a.argmax()]` is NA exactly when `a.max()` is |
@@ -223,8 +225,8 @@ plain arrays, is in `NUMPY-PATCHES.md`.
    widening to `int64`.
 3. **A real `longdouble`** through `numpy-quaddtype` instead of substituting
    `float64`.
-4. **Remove the fixed cost of `get_loop`** — two Python calls per operation, most
-   visible on small arrays.
+4. **Cache the loop lookups** — about 1.4 µs of the ~2.5 µs fixed cost per
+   operation, most visible on small arrays.
 
 ## Settled design notes
 

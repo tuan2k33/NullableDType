@@ -2419,3 +2419,121 @@ def test_numpy_mean_of_nullable_int_is_not_truncated():
     i = np.array([1, 2], dtype=nd.Nullable(np.int64))
     assert nd.mean(i) == 1.5          # the nd version is right
     assert np.mean(i) == 1.5          # numpy's gives 1
+
+
+@pytest.mark.parametrize("t", [np.float64, np.float32, np.int64, np.int32,
+                               np.int16, np.uint8])
+def test_block_scan_edges(t):
+    """The fixup scans in blocks of 2048 and skips blocks with no gap; a gap on
+    either side of a block edge, in the last short block, or in only one
+    operand must still come out as NA, and nothing else may."""
+    n = 2048 * 3 + 5
+    dt = nd.Nullable(t)
+    a = np.ones(n, dtype=dt)
+    b = np.ones(n, dtype=dt)
+    gaps_a = [0, 2047, 2048, 4095, n - 1]
+    gaps_b = [100, 4096, n - 3]
+    for i in gaps_a:
+        a[i] = nd.NA
+    for i in gaps_b:
+        b[i] = nd.NA
+    got = nd.isna(a + b)
+    want = np.zeros(n, dtype=bool)
+    want[gaps_a + gaps_b] = True
+    np.testing.assert_array_equal(got, want)
+    assert (nd.filled(a + b, 0)[~want] == 2).all()
+
+
+def test_block_scan_still_catches_a_computed_na_after_a_clean_block():
+    """A block without gaps still checks whether the result landed on the
+    reserved value."""
+    n = 2048 * 2 + 1
+    a = np.zeros(n, dtype=nd.Nullable(np.int32))
+    a[-1] = np.iinfo(np.int32).max
+    with pytest.raises(ValueError, match="reserved value"):
+        a + np.ones(n, dtype=nd.Nullable(np.int32))
+
+
+_SPECIALS = [0.0, -0.0, 1.0, -1.0, 2.0, 0.5, np.inf, -np.inf, np.nan]
+# ops whose answer depends on the missing value although IEEE gives a number
+_DEPENDS_ON_GAP = {"fmax", "fmin", "copysign"}
+
+
+@pytest.mark.parametrize("t", [np.float64, np.float32, np.float16,
+                               np.complex128, np.complex64])
+@pytest.mark.parametrize("n", [1, 5000])
+def test_every_binop_keeps_a_gap(t, n):
+    """A gap is a value nobody knows.  Where the result would differ for some
+    value of it, the result is NA; where IEEE 754 already says it cannot --
+    `1 ** x == x ** 0 == 1`, `hypot(inf, x) == inf`, `heaviside(y != 0, x)` --
+    the number stands, as in R and pandas.  So the expected answer is IEEE's
+    with a NaN in place of the gap, NA wherever that is NaN, and NA always for
+    `fmax`, `fmin` and `copysign`, which do look at the missing value.
+    Complex operands conservatively always give NA.
+
+    Every element involves a gap, so any floating-point warning is a spurious
+    one (`binop_signals_on_gap`); complex division, power and ordering used to
+    raise "invalid value" this way."""
+    dt = nd.Nullable(t)
+    is_complex = np.dtype(t).kind == "c"
+    gap = np.empty(n, dtype=dt)
+    gap[...] = nd.NA
+    nan = np.full(n, np.nan, dtype=t)
+    wrong = []
+    for name in _c.binop_names:
+        f = getattr(np, name)
+        for v in _SPECIALS:
+            plain = np.full(n, v, dtype=t)
+            other = plain.astype(dt)
+            for x, y, px, py, side in ((other, gap, plain, nan, "right"),
+                                       (gap, other, nan, plain, "left")):
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("error", RuntimeWarning)
+                        r = f(x, y)
+                except RuntimeWarning as w:
+                    wrong.append((name, v, side, str(w)))
+                    continue
+                except (TypeError, ValueError):
+                    continue            # op not defined for this dtype
+                if not nd.is_nullable(r.dtype):
+                    continue
+                with np.errstate(all="ignore"):
+                    ref = np.asarray(f(px, py))
+                if ref.dtype.kind in "fc" and not is_complex \
+                        and name not in _DEPENDS_ON_GAP:
+                    expect_na = np.isnan(ref)
+                else:
+                    expect_na = np.ones(n, dtype=bool)
+                got_na = nd.isna(r)
+                if not (got_na == expect_na).all():
+                    wrong.append((name, v, side, "NA where", got_na[0], "expected", expect_na[0]))
+                    continue
+                if (~expect_na).any():
+                    kept = nd.to_numpy(r[~expect_na])
+                    if not (kept == ref[~expect_na]).all():
+                        wrong.append((name, v, side, "value", kept[0], ref[~expect_na][0]))
+    assert not wrong
+
+
+@pytest.mark.parametrize("t", [np.int64, np.int32, np.int8, np.uint8, np.uint64])
+@pytest.mark.parametrize("n", [1, 5000])
+def test_integer_power_over_a_gap(t, n):
+    """An integer gap is INT_MIN (or UINT_MAX); integer `power` used to read it
+    as a negative exponent and raise.  Now it never sees the gap, and the two
+    determined cases give 1 as for floats.  A real negative exponent still
+    raises, as for a plain array."""
+    dt = nd.Nullable(t)
+    base = np.array([1, 2, 0, 0, 3], dtype=t).astype(dt)
+    expo = np.array([0, 0, 0, 2, 0], dtype=t).astype(dt)
+    base[2] = base[3] = nd.NA
+    expo[0] = expo[1] = nd.NA
+    base, expo = np.tile(base, n), np.tile(expo, n)
+    got = np.power(base, expo)
+    assert nd.isna(got).tolist() == [False, True, False, True, False] * n
+    assert got[0] == 1 and got[2] == 1 and got[4] == 1
+
+    if np.dtype(t).kind == "i":
+        with pytest.raises(ValueError, match="negative integer powers"):
+            np.power(np.array([2], dtype=t).astype(dt),
+                     np.array([-1], dtype=t).astype(dt))
