@@ -1,0 +1,24 @@
+diff --git a/numpy/_core/src/common/simd/simd.h b/numpy/_core/src/common/simd/simd.h
+index fd1be6e0c8..35dab13bed 100644
+--- a/numpy/_core/src/common/simd/simd.h
++++ b/numpy/_core/src/common/simd/simd.h
+@@ -160,8 +160,7 @@ typedef double     npyv_lanetype_f64;
+     NPY_FINLINE int                                                         \
+     npyv_loadable_stride_##SFX(npy_intp stride)                             \
+     {                                                                       \
+-        if (alignof(npyv_lanetype_##SFX) != sizeof(npyv_lanetype_##SFX) &&  \
+-                stride % sizeof(npyv_lanetype_##SFX) != 0) {                \
++        if (stride % sizeof(npyv_lanetype_##SFX) != 0) {                    \
+             /* stride not a multiple of itemsize, cannot handle. */         \
+             return 0;                                                       \
+         }                                                                   \
+@@ -171,8 +170,7 @@ typedef double     npyv_lanetype_f64;
+     NPY_FINLINE int                                                         \
+     npyv_storable_stride_##SFX(npy_intp stride)                             \
+     {                                                                       \
+-        if (alignof(npyv_lanetype_##SFX) != sizeof(npyv_lanetype_##SFX) &&  \
+-                stride % sizeof(npyv_lanetype_##SFX) != 0) {                \
++        if (stride % sizeof(npyv_lanetype_##SFX) != 0) {                    \
+             /* stride not a multiple of itemsize, cannot handle. */         \
+             return 0;                                                       \
+         }                                                                   \
