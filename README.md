@@ -18,9 +18,6 @@ sizes and NA patterns is in `LAYOUTS.md`. The comparison with `numpy.ma`,
 covering all 218 names in `numpy.ma.__all__` that numpy 2 still spells that way,
 with a real call and a real result in every cell, is in `VS-NUMPY-MA.md`.
 
-R-flavoured semantics — see `../numpy-pr-work/maskeddtype-spec.md`.
-Why `numpy.ma` is broken — see `../numpy-pr-work/gh-9750-analysis.md`.
-
 ## Running it
 
 ```bash
@@ -805,3 +802,7 @@ widened to 16.
 - Coercion to a Python scalar **raises**; use `.filled(x)` to get out.
 - **A cast never quietly creates an NA**, and never quietly drops one.
 - The data under an NA is **not observable**.
+
+## License
+
+BSD 3-Clause, the same terms as NumPy; see `LICENSE.txt`.
