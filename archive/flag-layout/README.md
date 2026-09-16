@@ -18,9 +18,6 @@ nd.FlagLayout(np.float64) # itemsize 9   — the value plus a flag byte, by name
 that operation by operation. The full table of types, sizes and NA patterns is
 in `LAYOUTS.md`.
 
-R-style semantics — see `../numpy-pr-work/maskeddtype-spec.md`.
-Background on why `numpy.ma` is broken — see `../numpy-pr-work/gh-9750-analysis.md`.
-
 ## Running
 
 ```bash
