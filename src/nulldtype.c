@@ -468,8 +468,13 @@ binop_rich_op(PyObject *ufunc)
     X(20) X(21) X(22) X(23) X(24) X(25) X(26) X(27) X(28)
 
 #define COUNT_ONE(I) + 1
-_Static_assert(0 BINOP_INDICES(COUNT_ONE) == N_BINOPS,
-               "BINOP_INDICES is out of step with binop_names");
+/*
+ * A compile-time check that also builds where `_Static_assert` does not
+ * (MSVC in its default C mode): an array of size -1 is an error.
+ */
+#define NULLABLE_STATIC_ASSERT(COND, NAME) typedef char NAME[(COND) ? 1 : -1]
+/* BINOP_INDICES is out of step with binop_names */
+NULLABLE_STATIC_ASSERT(0 BINOP_INDICES(COUNT_ONE) == N_BINOPS, binop_indices_in_step);
 
 
 /* zero-copy 1-D view over the value fields of one operand */
@@ -577,8 +582,8 @@ static PyObject *unop_ufuncs[N_UNOPS];
     X(20) X(21) X(22) X(23) X(24) X(25) X(26) X(27) X(28) X(29) \
     X(30) X(31) X(32) X(33) X(34) X(35) X(36) X(37) X(38) X(39) X(40)
 
-_Static_assert(0 UNOP_INDICES(COUNT_ONE) == N_UNOPS,
-               "UNOP_INDICES is out of step with unop_names");
+/* UNOP_INDICES is out of step with unop_names */
+NULLABLE_STATIC_ASSERT(0 UNOP_INDICES(COUNT_ONE) == N_UNOPS, unop_indices_in_step);
 
 
 /* ------------------------------------------------------- Kleene logic */

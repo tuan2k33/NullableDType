@@ -23,6 +23,8 @@ jobs:
       - uses: pypa/cibuildwheel@v4.2.1
         env:
           CIBW_BUILD: "cp312-* cp313-* cp314-*"
+          # numpy ships no 32-bit Windows wheels
+          CIBW_ARCHS_WINDOWS: AMD64
           CIBW_TEST_REQUIRES: pytest
           # run the suite against the installed wheel, from outside the source
           # tree so the local nulldtype.py does not shadow it
