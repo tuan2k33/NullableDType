@@ -2588,3 +2588,56 @@ def test_inplace_ops_keep_their_gaps(t, n):
             except (TypeError, ValueError):
                 continue            # not defined for this dtype, or unsafe out
             np.testing.assert_array_equal(nd.isna(a), gaps, err_msg=name)
+
+
+@pytest.mark.parametrize("t", [np.int8, np.int32, np.int64, np.uint8, np.uint64])
+@pytest.mark.parametrize("n", [1, 5000])
+def test_every_binop_keeps_a_gap_integers(t, n):
+    """The integer side of `test_every_binop_keeps_a_gap`: a gap is INT_MIN or
+    UINT_MAX, so `NA // -1` overflowed and `NA // 0` divided by zero -- warnings
+    about a value that is not there.  Every result is NA except the two
+    determined powers, and a real zero divisor still warns."""
+    dt = nd.Nullable(t)
+    gap = np.empty(n, dtype=dt)
+    gap[...] = nd.NA
+    values = [0, 1, 2, 3] + ([-1, -2] if np.dtype(t).kind == "i" else [])
+    wrong = []
+    for name in _c.binop_names:
+        f = getattr(np, name)
+        for v in values:
+            other = np.full(n, v, dtype=t).astype(dt)
+            for x, y, side in ((other, gap, "right"), (gap, other, "left")):
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("error", RuntimeWarning)
+                        r = f(x, y)
+                except RuntimeWarning as w:
+                    wrong.append((name, v, side, str(w)))
+                    continue
+                except (TypeError, ValueError):
+                    continue
+                if not nd.is_nullable(r.dtype):
+                    continue
+                if r.dtype.wrapped.kind == "f":
+                    # computed in floats (`heaviside`, `float_power`, ...):
+                    # IEEE decides, as in `test_every_binop_keeps_a_gap`
+                    fv = np.full(n, v, dtype=np.float64)
+                    nan = np.full(n, np.nan)
+                    with np.errstate(all="ignore"):
+                        ref = f(fv, nan) if side == "right" else f(nan, fv)
+                    expect_na = np.isnan(ref) | (name in _DEPENDS_ON_GAP)
+                    if not (nd.isna(r) == expect_na).all():
+                        wrong.append((name, v, side, "float rule"))
+                    continue
+                determined = name == "power" and (
+                    (side == "right" and v == 1) or (side == "left" and v == 0))
+                if determined:
+                    if nd.isna(r).any() or not (nd.filled(r, 0) == 1).all():
+                        wrong.append((name, v, side, "expected 1"))
+                elif not nd.isna(r).all():
+                    wrong.append((name, v, side, "expected NA"))
+    assert not wrong
+
+    x = np.ones(3, dtype=dt)
+    with pytest.warns(RuntimeWarning, match="divide by zero"):
+        np.floor_divide(x, np.zeros(3, dtype=dt))

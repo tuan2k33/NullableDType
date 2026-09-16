@@ -453,6 +453,14 @@ component, `power` special-cases its arguments, and ordering compares
 lexicographically with `<`. For complex operands only `add`, `subtract`,
 `multiply`, `==` and `!=` run straight over a gap.
 
+The division family joined them after the first Windows wheel build. MSVC's
+float32 `floor_divide` and `fmod` signal "invalid" on an inf or NaN operand,
+and on every platform an integer gap is `INT_MIN`, so `NA // -1` overflowed and
+`NA // 0` divided by zero — warnings about a value that is not there.
+`floor_divide`, `remainder` and `fmod` now always take the masked path, where
+a real zero divisor still warns. `test_every_binop_keeps_a_gap_integers` is
+the integer counterpart of the float sweep.
+
 Both lists are empirical, not derivable, so the test suite sweeps *every*
 operation, taking the names straight from the C table: an operation missing from
 a list turns a test red instead of turning up as a strange warning in someone's

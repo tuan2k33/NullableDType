@@ -654,6 +654,17 @@ binop_signals_on_gap(int idx, int complex_operand)
         return 1;
     }
     /*
+     * The division family raises on a gap in several ways: an integer gap is
+     * INT_MIN, so `NA // -1` overflows, and `NA // 0` divides by zero for a
+     * value that is not there; MSVC's float32 `floor_divide` and `fmod`
+     * signal "invalid" on inf and NaN operands.  A real zero divisor still
+     * warns, since the masked path computes every element that has a value.
+     */
+    if (strcmp(n, "floor_divide") == 0 || strcmp(n, "remainder") == 0
+            || strcmp(n, "fmod") == 0) {
+        return 1;
+    }
+    /*
      * Complex kernels compare magnitudes almost everywhere: division scales by
      * the larger component, `power` special-cases, ordering is lexicographic
      * with `<`.  Only the plain componentwise ops stay quiet over a NaN.
