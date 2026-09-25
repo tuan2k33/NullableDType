@@ -219,8 +219,9 @@ plain arrays, is in `NUMPY-PATCHES.md`.
 
 1. **Report the numpy bugs upstream, and propose the hooks in
    `NUMPY-PATCHES.md`.** Bug candidates:
-   - `sort` not checking for `NULL` after `PyArray_DescrNewByteorder`;
-   - `repr` of a non-numpy dtype blowing up when `str()` of an element is empty;
+   - `repr` blowing up when the text of an element is empty: `_extendLine_pretty`
+     calls `max()` on `''.splitlines()`. Plain numpy reproduces it with
+     `np.array2string(np.array([1, 2]), formatter={"all": lambda x: ""})`;
    - ask for `resolve_descriptors_with_scalars` to become public (gh-24915), which
      would close the NEP 50 widening gap above.
 
