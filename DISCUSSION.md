@@ -199,9 +199,17 @@ nan + NA  ->  [NA nan]     both ways round, and an ordinary nan stays a nan
 
 Almost all of the difference is the NA scan — one extra read over data that was
 just written. On small arrays the fixed cost dominates: about 2.5 µs per
-operation, of which the loop lookups are about 1.4 µs (`resolve_dtypes` 0.54 µs,
-`_resolve_dtypes_and_context` plus `_get_strided_loop` 0.89 µs). A cache could
-remove most of that.
+operation, of which the loop lookups were about 1.4 µs (`resolve_dtypes` 0.54 µs,
+`_resolve_dtypes_and_context` plus `_get_strided_loop` 0.89 µs). A small cache of
+the resolved loop, keyed by op, the three wrapped dtypes and the strides, removed
+the two Python-level calls: `a + b` on 10 elements went from 2.9 to 1.5 µs and on
+1,000 from 3.5 to 2.0 µs (numpy 2.5.3). Only loops whose auxdata is absent or has
+no `clone` are cached: numpy's legacy wrapper keeps the inner loop and its user
+data there, marks it "no need for cloning", and never writes to it, so one copy
+serves every call. An entry holds the capsule that owns the `ufunc_call_info`, and
+through it the descriptors the key points at, so a key can never dangle. The
+first attempt cached only loops with *no* auxdata and did nothing: numpy 2.5's
+legacy loops all carry one.
 
 The fixup as described above, against the per-element version it replaced,
 for `a + b` with two distinct arrays (numpy 2.5.3, gcc 15, median of six
@@ -340,49 +348,6 @@ of different dtypes raise `TypeError`, and since numpy only swallows
 `UFuncNoLoopError`, that one still comes out. Every other ufunc on records still
 raises, because only `==` and `!=` are swallowed.
 
-## A numpy bug found along the way
-
-`maximum`/`minimum` used to return wrong results when called through the
-borrowed-loop capsule. It looked like "the last element is skipped"; chased to
-the end, the cause was entirely different and lives in numpy, not in this dtype.
-
-`loops_minmax.dispatch.c.src` turns a byte stride into an element stride with
-`is1 / sizeof(STYPE)`, after asking `npyv_loadable_stride`. But in
-`numpy/_core/src/common/simd/simd.h` the divisibility check is wrapped in one
-more condition:
-
-```c
-if (alignof(npyv_lanetype_##SFX) != sizeof(npyv_lanetype_##SFX) &&
-        stride % sizeof(npyv_lanetype_##SFX) != 0) {
-    return 0;
-}
-stride = stride / sizeof(npyv_lanetype_##SFX);
-```
-
-For `double` on x86-64, `alignof == sizeof == 8`, so **the left side is false and
-the divisibility check never runs**. The division then truncates: stride 9
-becomes 1, stride 12 becomes 1, and the SIMD loop walks the array as if it were
-contiguous — reading both inputs wrong and writing the output wrong.
-
-The very commit that added this (`94854dbc77`, "BUG: Fix simd loadable stride
-logic") states the opposite intent: *"Strides are now guaranteed to be a
-multiple and compatible"*. The `alignof != sizeof` condition disables exactly
-what it just added.
-
-numpy itself never trips over it, because it buffers into contiguous memory
-before calling the loop. Only a third party calling
-`ufunc._get_strided_loop(..., fixed_strides=...)` directly — public API since
-1.24, and exactly what this prototype uses — can hit it.
-
-A minimal reproducer in ctypes, with no custom dtype involved:
-`scratchpad/minmax_raw.py`. The proposed patch (drop the `alignof` clause) is in
-`numpy-simd-stride.patch`. **Not reported upstream yet.**
-
-On this side it only takes checking divisibility instead of excluding the two
-operations outright. The item size equals `T`'s, so every stride is a multiple
-of it and the fast path always applies — 3.1x slower than plain numpy at 100,000
-elements and 1.4x at 5,000,000.
-
 ## Why float NA is `0x7FFF…` and a *quiet* NaN
 
 R uses `0x7FF00000000007A2` for `NA_real_` (0x7A2 = 1954, Ross Ihaka's year of
@@ -470,35 +435,6 @@ red respectively. `test_every_binop_keeps_a_gap` adds the special values
 complex width, and fails on a lost gap or on any floating-point warning;
 removing the four new entries turns 5 of its cases red, removing the complex
 rule 4.
-
-## The second numpy bug: an assertion too strict for non-legacy DTypes
-
-`Nullable[f8]` in the **flag layout** (now archived) plus a Python literal, on an
-array larger than `NPY_BUFSIZE` (8192), **aborts** the numpy dev build:
-
-```
-can_cast_pyscalar_scalar_to: Assertion `NPY_DT_is_legacy(NPY_DTYPE(to))' failed.
-```
-
-All three are needed: a non-legacy DType, the other operand being a **Python
-literal** (writing `np.float64(1.0)` does not trip it), and the array being split
-into buffered chunks — raising `np.setbufsize` above the array size makes it go
-away. The current layout does not hit it, because the item size equals `T`'s and
-is properly aligned, so no buffering is needed.
-
-But reading further into that function shows **the assertion is the wrong part,
-not the code under it**. The three shortcuts at the top
-(`ISCOMPLEX`/`ISFLOAT`/`ISINTEGER`) all key on `type_num` and all return `false`
-for this descriptor (`num = -1`); the final branch is generic — it builds a
-descriptor for the scalar and calls the common `PyArray_CanCastTypeTo`, which
-works for any DType.
-
-Verified: removing that one `assert` line and rebuilding numpy makes every array
-size work, with results matching plain numpy. The patch is in
-`numpy-pyscalar-assert.patch`.
-
-It only affects builds with assertions on; in a released numpy `assert` is
-disabled and the generic path was already correct. **Not reported upstream yet.**
 
 ## Three-valued logic
 

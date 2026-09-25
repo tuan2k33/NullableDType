@@ -50,7 +50,7 @@ builds and runs pytest (extra arguments go to pytest). They use `python3`;
 set `PYTHON`, and `NUMPY_SITE` for a numpy dev tree that is not installed, or
 put both in an uncommitted `local.env`.
 
-The suite has 637 tests plus 2 expected failures that pin known gaps. It also
+The suite has 639 tests plus 2 expected failures that pin known gaps. It also
 passes on an ASAN + UBSAN build, which CI runs on every push.
 
 ## What works
@@ -178,10 +178,13 @@ plain arrays, is in `NUMPY-PATCHES.md`.
 - `np.dot` **cannot be implemented**: numpy hands its slot a NULL array (see
   `DISCUSSION.md`). Use `@` or `nd.dot`.
 - **Python scalars and NEP 50.**
-  - **Widening:** `Nullable[i4] + 2` gives `Nullable[i8]`, where numpy keeps
-    `int32` under the weak-scalar rule. Fixable with
-    `NPY_METH_resolve_descriptors_with_scalars`, not done yet; an `xfail` test
-    holds the place.
+  - **Widening:** a Python scalar makes the result wider than numpy's weak-scalar
+    rule would: `Nullable[i4] + 2` gives `Nullable[i8]` where numpy keeps `int32`,
+    and `Nullable[f4] + 1.5` gives `Nullable[f8]`. The values are right; only the
+    result dtype is bigger. Not fixable on stock numpy: the one hook that would
+    do it, `_NPY_METH_resolve_descriptors_with_scalars`, is private and refuses a
+    third-party DType (gh-24915). Cast the scalar, `a + np.int32(2)`, to keep the
+    width. An `xfail` test pins the gap.
   - **Promotion error:** `np.result_type(dtype, 1.0)` raises
     `DTypePromotionError`, which takes `np.isclose`, `np.allclose` and
     `np.select` down with it. Declaring `common_dtype` for Python scalars fixes
@@ -216,17 +219,10 @@ plain arrays, is in `NUMPY-PATCHES.md`.
 
 1. **Report the numpy bugs upstream, and propose the hooks in
    `NUMPY-PATCHES.md`.** Bug candidates:
-   - the SIMD stride bug — patch and reproducer ready;
-   - the `can_cast_pyscalar_scalar_to` assertion — patch and reproducer ready;
    - `sort` not checking for `NULL` after `PyArray_DescrNewByteorder`;
-   - `repr` of a non-numpy dtype blowing up when `str()` of an element is empty.
-2. **Give NEP 50's weak-scalar rule back** with
-   `NPY_METH_resolve_descriptors_with_scalars`, so `Nullable[i4] + 2` stops
-   widening to `int64`.
-3. **A real `longdouble`** through `numpy-quaddtype` instead of substituting
-   `float64`.
-4. **Cache the loop lookups** — about 1.4 µs of the ~2.5 µs fixed cost per
-   operation, most visible on small arrays.
+   - `repr` of a non-numpy dtype blowing up when `str()` of an element is empty;
+   - ask for `resolve_descriptors_with_scalars` to become public (gh-24915), which
+     would close the NEP 50 widening gap above.
 
 ## Settled design notes
 

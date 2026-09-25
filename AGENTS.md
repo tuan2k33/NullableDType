@@ -28,8 +28,6 @@ numpy** — never patch numpy to make something here work.
 - `archive/flag-layout/` — frozen snapshot of the old two-layout version. It
   builds and tests on its own; do not change its behaviour.
 - `LICENSE.txt` — BSD 3-Clause, as NumPy.
-- `numpy-*.patch` — proposed upstream fixes for numpy bugs found here. The
-  project must not depend on them.
 
 ## Build and test
 
