@@ -1314,10 +1314,41 @@ def test_python_scalars_keep_the_arrays_dtype():
 
 @pytest.mark.xfail(strict=True, reason="the promoter hands the Python scalar "
                                        "its own default dtype, so a narrow "
-                                       "wrapped dtype widens; NEP 50 keeps it")
+                                       "wrapped dtype widens; NEP 50 keeps it. "
+                                       "Needs the private numpy slot "
+                                       "_NPY_METH_resolve_descriptors_with_scalars "
+                                       "(gh-24915)")
 def test_a_python_scalar_does_not_widen_a_narrow_dtype():
     i4 = np.array([7], dtype=nd.Nullable(np.int32))
     assert (i4 + 2).dtype == nd.Nullable(np.int32)
+
+
+def test_a_typed_scalar_keeps_the_width():
+    """The way around the widening above: a NumPy scalar is not weak, so it
+    promotes by its own type."""
+    i4 = np.array([7], dtype=nd.Nullable(np.int32))
+    f4 = np.array([1.5], dtype=nd.Nullable(np.float32))
+    assert (i4 + np.int32(2)).dtype == nd.Nullable(np.int32)
+    assert (f4 + np.float32(1.5)).dtype == nd.Nullable(np.float32)
+
+
+def test_cached_loops_answer_for_every_dtype_and_stride():
+    """The wrapped loop is looked up once per (op, dtypes, strides) and kept.
+    Walk more combinations than the cache has slots, twice over, so every
+    answer comes from a hit after an eviction, and compare with plain numpy."""
+    for _ in range(2):
+        for t in ("f8", "f4", "i4", "i8", "u2"):
+            plain = (np.arange(60) % 7).astype(t)
+            a = plain.astype(nd.Nullable(t))
+            a[4] = nd.NA
+            for step in range(1, 9):
+                v, p = a[::step], plain[::step]
+                for op in (np.add, np.multiply, np.maximum, np.minimum):
+                    got = op(v, v)
+                    want = op(p, p)
+                    gap = nd.isna(v)
+                    assert (nd.isna(got) == gap).all()
+                    assert (nd.filled(got, 0) == np.where(gap, 0, want)).all()
 
 
 def test_zero_dimensional_arrays_keep_their_shape():

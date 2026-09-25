@@ -2645,6 +2645,70 @@ nullable_fast_loop(PyArrayMethod_Context *context, char *const data[],
 }
 
 
+/*
+ * Resolving the wrapped loop costs two Python-level calls (`_resolve_dtypes_and_
+ * context`, `_get_strided_loop`), about 1.4 of the ~2.5 microseconds every small
+ * operation pays.  The answer only depends on the op, the three wrapped dtypes
+ * and the strides, so a few of them are kept.
+ *
+ * Only loops whose auxdata is absent or has no `clone` are cached.  NumPy's own
+ * legacy wrapper (numpy 2.5) carries the inner loop, its user data and a flag
+ * in an auxdata and marks it `clone = NULL`, "no need for cloning": it is read
+ * and never written, so one copy can serve any number of calls at once.  Each entry
+ * holds the capsule, which owns the `ufunc_call_info` and through it the
+ * descriptors the key points at -- so a key pointer can never dangle or be
+ * reused for another descriptor while its entry is alive.  A capsule can be
+ * filled only once, hence the entry reuses what is in it rather than asking
+ * `_get_strided_loop` again.  The GIL protects the table: this runs from
+ * `get_loop`, and every loop here declares `NPY_METH_REQUIRES_PYAPI`.
+ */
+#define LOOP_CACHE_SIZE 32
+
+typedef struct {
+    int idx;
+    PyArray_Descr *wrapped[3];
+    npy_intp strides[3];
+    PyObject *capsule;            /* NULL: empty slot */
+} loop_cache_entry;
+
+static loop_cache_entry loop_cache[LOOP_CACHE_SIZE];
+static int loop_cache_next = 0;
+
+
+static PyObject *
+loop_cache_find(int idx, PyArray_Descr *const wrapped[3],
+        const npy_intp *strides)
+{
+    for (int i = 0; i < LOOP_CACHE_SIZE; i++) {
+        loop_cache_entry *e = &loop_cache[i];
+        if (e->capsule != NULL && e->idx == idx
+                && e->wrapped[0] == wrapped[0] && e->wrapped[1] == wrapped[1]
+                && e->wrapped[2] == wrapped[2]
+                && e->strides[0] == strides[0] && e->strides[1] == strides[1]
+                && e->strides[2] == strides[2]) {
+            return e->capsule;
+        }
+    }
+    return NULL;
+}
+
+
+static void
+loop_cache_store(int idx, PyArray_Descr *const wrapped[3],
+        const npy_intp *strides, PyObject *capsule)
+{
+    loop_cache_entry *e = &loop_cache[loop_cache_next];
+    loop_cache_next = (loop_cache_next + 1) % LOOP_CACHE_SIZE;
+    Py_INCREF(capsule);
+    Py_XSETREF(e->capsule, capsule);
+    e->idx = idx;
+    for (int i = 0; i < 3; i++) {
+        e->wrapped[i] = wrapped[i];
+        e->strides[i] = strides[i];
+    }
+}
+
+
 static int
 nullable_get_loop_impl(int idx, PyArrayMethod_Context *context,
         int NPY_UNUSED(aligned), int NPY_UNUSED(move_references),
@@ -2685,10 +2749,18 @@ nullable_get_loop_impl(int idx, PyArrayMethod_Context *context,
         }
     }
     PyObject *ufunc = binop_ufuncs[idx];
-    PyObject *query = Py_BuildValue("(OOO)",
-            (PyObject *)NULLABLE_DESCR(context->descriptors[0])->wrapped,
-            (PyObject *)NULLABLE_DESCR(context->descriptors[1])->wrapped,
-            (PyObject *)NULLABLE_DESCR(context->descriptors[2])->wrapped);
+    PyArray_Descr *wrapped[3] = {
+            NULLABLE_DESCR(context->descriptors[0])->wrapped,
+            NULLABLE_DESCR(context->descriptors[1])->wrapped,
+            NULLABLE_DESCR(context->descriptors[2])->wrapped};
+    PyObject *capsule = loop_cache_find(idx, wrapped, strides);
+    if (capsule != NULL) {
+        Py_INCREF(capsule);
+        goto have_capsule;
+    }
+    PyObject *query = Py_BuildValue("(OOO)", (PyObject *)wrapped[0],
+                                    (PyObject *)wrapped[1],
+                                    (PyObject *)wrapped[2]);
     if (query == NULL) {
         return -1;
     }
@@ -2702,7 +2774,7 @@ nullable_get_loop_impl(int idx, PyArrayMethod_Context *context,
         *out_auxdata = NULL;
         return 1;
     }
-    PyObject *capsule = PyTuple_GET_ITEM(resolved, 1);
+    capsule = PyTuple_GET_ITEM(resolved, 1);
     Py_INCREF(capsule);
     Py_DECREF(resolved);
 
@@ -2722,6 +2794,7 @@ nullable_get_loop_impl(int idx, PyArrayMethod_Context *context,
     }
     Py_DECREF(res);
 
+    have_capsule:;
     nullable_call_info *info = PyCapsule_GetPointer(
             capsule, "numpy_1.24_ufunc_call_info");
     if (info == NULL || info->strided_loop == NULL) {
@@ -2729,6 +2802,10 @@ nullable_get_loop_impl(int idx, PyArrayMethod_Context *context,
         PyErr_Clear();
         *out_auxdata = NULL;
         return 1;
+    }
+    if ((info->auxdata == NULL || info->auxdata->clone == NULL)
+            && loop_cache_find(idx, wrapped, strides) == NULL) {
+        loop_cache_store(idx, wrapped, strides, capsule);
     }
     nullable_auxdata *aux = PyMem_Calloc(1, sizeof(nullable_auxdata));
     if (aux == NULL) {
